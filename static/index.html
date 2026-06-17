@@ -3,19 +3,20 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Drawing Reviewer V2</title>
+<title>Drawing Reviewer V2.0.1</title>
 <link rel="stylesheet" href="css/style.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 </head>
 <body>
 <div id="toolbar">
-  <h1>DRAWING REVIEWER V2</h1>
+  <h1>DRAWING REVIEWER V2.0.1</h1>
   <label for="fileInput">Upload PDF:</label>
   <input type="file" id="fileInput" accept=".pdf">
   <button id="analyzeBtn" disabled>Analyze</button>
   <button id="prevPage" disabled>&#8592; Prev</button>
   <span id="pageInfo">Page - / -</span>
   <button id="nextPage" disabled>&#8594; Next</button>
+  <button id="toggleMarkersBtn" title="Toggle finding markers">Hide Markers</button>
   <button id="exportBtn" disabled>Export PDF</button>
   <span id="statusBar">No file loaded</span>
 </div>
@@ -27,6 +28,13 @@
   <div id="sidebar">
     <h2>Findings</h2>
     <div id="findingsList"></div>
+    <div id="findingDetailPanel" style="display:none;">
+      <div id="detailHeader">
+        <span id="detailTitle"></span>
+        <button id="closeDetailBtn">&times;</button>
+      </div>
+      <div id="detailContent"></div>
+    </div>
     <div id="summaryBar">
       <span id="sumTotal">0</span> total &nbsp;
       <span id="sumApproved">0</span> approved &nbsp;
@@ -54,6 +62,7 @@ PDFJS.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pd
 let pdfDoc = null, currentPage = 1, totalPages = 0;
 let findings = [], pdfBase64 = '';
 let editTarget = -1;
+let markersVisible = true;
 const scale = 1.8;
 
 const canvas = document.getElementById('pdfCanvas');
@@ -61,6 +70,7 @@ const ctx = canvas.getContext('2d');
 const viewerWrap = document.getElementById('viewerWrap');
 const connectorSvg = document.getElementById('connectorSvg');
 const statusBar = document.getElementById('statusBar');
+const detailPanel = document.getElementById('findingDetailPanel');
 
 // ---- FILE LOAD ----
 document.getElementById('fileInput').addEventListener('change', e => {
@@ -70,7 +80,6 @@ document.getElementById('fileInput').addEventListener('change', e => {
   const reader = new FileReader();
   reader.onload = ev => {
     const arr = new Uint8Array(ev.target.result);
-    // Chunked base64
     let binary = '';
     const chunkSize = 8192;
     for (let i = 0; i < arr.length; i += chunkSize) {
@@ -85,6 +94,7 @@ document.getElementById('fileInput').addEventListener('change', e => {
       document.getElementById('analyzeBtn').disabled = false;
       document.getElementById('prevPage').disabled = false;
       document.getElementById('nextPage').disabled = false;
+      document.getElementById('toggleMarkersBtn').disabled = false;
       renderPage(currentPage);
       statusBar.textContent = `Loaded: ${file.name} (${totalPages} page${totalPages>1?'s':''})`;
     });
@@ -99,7 +109,6 @@ function renderPage(num) {
     canvas.height = vp.height;
     page.render({canvasContext: ctx, viewport: vp}).promise.then(() => {
       document.getElementById('pageInfo').textContent = `Page ${num} / ${totalPages}`;
-      // Position SVG and bubbles
       connectorSvg.setAttribute('width', canvas.width);
       connectorSvg.setAttribute('height', canvas.height);
       connectorSvg.style.left = canvas.offsetLeft + 'px';
@@ -113,6 +122,13 @@ document.getElementById('prevPage').addEventListener('click', () => {
 });
 document.getElementById('nextPage').addEventListener('click', () => {
   if (currentPage < totalPages) { currentPage++; renderPage(currentPage); }
+});
+
+// ---- TOGGLE MARKERS ----
+document.getElementById('toggleMarkersBtn').addEventListener('click', () => {
+  markersVisible = !markersVisible;
+  document.getElementById('toggleMarkersBtn').textContent = markersVisible ? 'Hide Markers' : 'Show Markers';
+  renderOverlays();
 });
 
 // ---- ANALYZE ----
@@ -129,76 +145,52 @@ document.getElementById('analyzeBtn').addEventListener('click', () => {
       ...f,
       id: i,
       status: 'pending',
-      // Assign a rough position on canvas for the bubble
-      // Use page fraction from server if available, else distribute
       bx: f.x != null ? f.x * canvas.width : 60 + (i % 3) * 180,
       by: f.y != null ? f.y * canvas.height : 80 + Math.floor(i / 3) * 130
     }));
     renderOverlays();
     renderSidebar();
     document.getElementById('exportBtn').disabled = false;
-    statusBar.textContent = `Analysis complete: ${findings.length} finding(s) on ${totalPages} page(s)`;
+    statusBar.textContent = `Analysis complete: ${findings.length} finding(s)`;
   })
   .catch(err => { statusBar.textContent = 'Analysis error: ' + err; });
 });
 
-// ---- OVERLAYS (bubbles + SVG connectors) ----
+// ---- OVERLAYS (ONLY dots+connectors, NO bubbles on canvas) ----
 function renderOverlays() {
-  // Remove old bubbles
-  document.querySelectorAll('.finding-bubble').forEach(b => b.remove());
   connectorSvg.innerHTML = '';
+  if (!markersVisible) return;
 
-  const pageFindigs = findings.filter(f => (f.page || 1) === currentPage && f.status !== 'rejected');
+  const pageFindings = findings.filter(f => (f.page || 1) === currentPage && f.status !== 'rejected');
 
-  pageFindigs.forEach(f => {
-    // Bubble
-    const bubble = document.createElement('div');
-    bubble.className = `finding-bubble severity-${f.severity || 'medium'}`;
-    bubble.dataset.id = f.id;
-
-    // Offset the bubble away from the point
-    const bOffX = f.bx + 30;
-    const bOffY = Math.max(10, f.by - 60);
-    bubble.style.left = (canvas.offsetLeft + bOffX) + 'px';
-    bubble.style.top = bOffY + 'px';
-
+  pageFindings.forEach(f => {
     const sev = (f.severity || 'medium').toLowerCase();
-    const typeLabel = (f.type || 'issue').replace(/_/g,' ');
-    bubble.innerHTML = `
-      <div class="bubble-header">
-        <span class="bubble-tag">${sev}</span>
-        <span class="bubble-type">${typeLabel}</span>
-      </div>
-      <div class="bubble-reason">${f.reason || ''}</div>
-      ${ f.current || f.suggested ? `<div class="bubble-values">Was: <span>${f.current||'?'}</span> &rarr; Use: <span>${f.suggested||'?'}</span></div>` : '' }
-      <div class="bubble-actions">
-        <button class="btn-approve" onclick="setStatus(${f.id},'approved')">&#10003; Approve</button>
-        <button class="btn-reject" onclick="setStatus(${f.id},'rejected')">&#10007; Reject</button>
-        <button class="btn-edit" onclick="openEdit(${f.id})">&#9998; Edit</button>
-      </div>
-    `;
-    viewerWrap.appendChild(bubble);
-
-    // SVG connector line from point on drawing to bubble
-    const line = document.createElementNS('http://www.w3.org/2000/svg','line');
-    line.setAttribute('x1', f.bx);
-    line.setAttribute('y1', f.by);
-    line.setAttribute('x2', bOffX + 0);
-    line.setAttribute('y2', bOffY + 20);
     const strokeCol = sev === 'high' ? '#e94560' : sev === 'medium' ? '#f0a500' : '#3a86ff';
-    line.setAttribute('stroke', strokeCol);
-    line.setAttribute('stroke-width', '1.5');
-    line.setAttribute('stroke-dasharray', '5,3');
-    connectorSvg.appendChild(line);
 
-    // Dot at target point
+    // Dot
     const circle = document.createElementNS('http://www.w3.org/2000/svg','circle');
     circle.setAttribute('cx', f.bx);
     circle.setAttribute('cy', f.by);
-    circle.setAttribute('r', '5');
+    circle.setAttribute('r', '8');
     circle.setAttribute('fill', strokeCol);
-    circle.setAttribute('opacity', '0.85');
+    circle.setAttribute('stroke', '#fff');
+    circle.setAttribute('stroke-width', '2');
+    circle.setAttribute('opacity', '0.9');
+    circle.style.cursor = 'pointer';
+    circle.onclick = () => showDetail(f.id);
     connectorSvg.appendChild(circle);
+
+    // Number label inside dot
+    const text = document.createElementNS('http://www.w3.org/2000/svg','text');
+    text.setAttribute('x', f.bx);
+    text.setAttribute('y', f.by + 4);
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('font-size', '11');
+    text.setAttribute('font-weight', 'bold');
+    text.setAttribute('fill', '#fff');
+    text.setAttribute('pointer-events', 'none');
+    text.textContent = f.id + 1;
+    connectorSvg.appendChild(text);
   });
 }
 
@@ -206,7 +198,46 @@ function setStatus(id, status) {
   findings[id].status = status;
   renderOverlays();
   renderSidebar();
+  if (detailPanel.style.display !== 'none') {
+    showDetail(id);
+  }
 }
+
+// ---- DETAIL PANEL (in sidebar, not over canvas) ----
+function showDetail(id) {
+  const f = findings[id];
+  if (!f) return;
+  
+  const sev = (f.severity || 'medium').toLowerCase();
+  const typeLabel = (f.type || 'issue').replace(/_/g,' ');
+  
+  document.getElementById('detailTitle').textContent = `#${id+1} - ${typeLabel}`;
+  document.getElementById('detailTitle').className = `detail-badge severity-${sev}`;
+  
+  document.getElementById('detailContent').innerHTML = `
+    <div class="detail-row"><strong>Severity:</strong> <span class="severity-${sev}">${sev.toUpperCase()}</span></div>
+    <div class="detail-row"><strong>Page:</strong> ${f.page || 1}</div>
+    <div class="detail-row"><strong>Reason:</strong> ${f.reason || 'N/A'}</div>
+    ${ f.current ? `<div class="detail-row"><strong>Current:</strong> ${f.current}</div>` : '' }
+    ${ f.suggested ? `<div class="detail-row"><strong>Suggested:</strong> ${f.suggested}</div>` : '' }
+    <div class="detail-actions">
+      <button class="btn-approve" onclick="setStatus(${id},'approved')">&#10003; Approve</button>
+      <button class="btn-reject" onclick="setStatus(${id},'rejected')">&#10007; Reject</button>
+      <button class="btn-edit" onclick="openEdit(${id})">&#9998; Edit</button>
+    </div>
+  `;
+  
+  detailPanel.style.display = 'block';
+  
+  if ((f.page||1) !== currentPage) {
+    currentPage = f.page||1;
+    renderPage(currentPage);
+  }
+}
+
+document.getElementById('closeDetailBtn').onclick = () => {
+  detailPanel.style.display = 'none';
+};
 
 // ---- EDIT MODAL ----
 function openEdit(id) {
@@ -228,6 +259,9 @@ document.getElementById('editSave').onclick = () => {
   document.getElementById('editModal').classList.remove('open');
   renderOverlays();
   renderSidebar();
+  if (detailPanel.style.display !== 'none') {
+    showDetail(editTarget);
+  }
 };
 
 // ---- SIDEBAR ----
@@ -242,19 +276,14 @@ function renderSidebar() {
     card.className = `finding-card severity-${f.severity||'medium'} status-${f.status}`;
     card.innerHTML = `
       <div class="fc-header">
+        <span class="fc-num">#${f.id+1}</span>
         <span class="fc-type">${(f.type||'issue').replace(/_/g,' ')}</span>
         <span class="fc-sev">${f.severity||'medium'}</span>
       </div>
       <div class="fc-reason">${f.reason||''}</div>
       <div class="fc-status">${f.status.toUpperCase()}</div>
     `;
-    card.onclick = () => {
-      // Jump to the page of this finding
-      if ((f.page||1) !== currentPage) {
-        currentPage = f.page||1;
-        renderPage(currentPage);
-      }
-    };
+    card.onclick = () => showDetail(f.id);
     list.appendChild(card);
   });
   document.getElementById('sumTotal').textContent = findings.length;
