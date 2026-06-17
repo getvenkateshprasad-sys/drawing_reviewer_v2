@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Drawing Reviewer V2</title>
+<link rel="stylesheet" href="css/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head>
+<body>
+<div id="toolbar">
+  <h1>DRAWING REVIEWER V2</h1>
+  <label for="fileInput">Upload PDF:</label>
+  <input type="file" id="fileInput" accept=".pdf">
+  <button id="analyzeBtn" disabled>Analyze</button>
+  <button id="prevPage" disabled>&#8592; Prev</button>
+  <span id="pageInfo">Page - / -</span>
+  <button id="nextPage" disabled>&#8594; Next</button>
+  <button id="exportBtn" disabled>Export PDF</button>
+  <span id="statusBar">No file loaded</span>
+</div>
+<div id="main">
+  <div id="viewerWrap">
+    <canvas id="pdfCanvas"></canvas>
+    <svg class="connector-svg" id="connectorSvg"></svg>
+  </div>
+  <div id="sidebar">
+    <h2>Findings</h2>
+    <div id="findingsList"></div>
+    <div id="summaryBar">
+      <span id="sumTotal">0</span> total &nbsp;
+      <span id="sumApproved">0</span> approved &nbsp;
+      <span id="sumRejected">0</span> rejected
+    </div>
+  </div>
+</div>
+<div id="editModal">
+  <div id="editModalBox">
+    <h3>Edit Finding</h3>
+    <label>Suggested value</label>
+    <input type="text" id="editSuggested">
+    <label>Reason / Comment</label>
+    <textarea id="editReason"></textarea>
+    <div class="modal-actions">
+      <button class="btn-reject" id="editCancel">Cancel</button>
+      <button class="btn-approve" id="editSave">Save</button>
+    </div>
+  </div>
+</div>
+<script>
+const PDFJS = pdfjsLib;
+PDFJS.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+let pdfDoc = null, currentPage = 1, totalPages = 0;
+let findings = [], pdfBase64 = '';
+let editTarget = -1;
+const scale = 1.8;
+
+const canvas = document.getElementById('pdfCanvas');
+const ctx = canvas.getContext('2d');
+const viewerWrap = document.getElementById('viewerWrap');
+const connectorSvg = document.getElementById('connectorSvg');
+const statusBar = document.getElementById('statusBar');
+
+// ---- FILE LOAD ----
+document.getElementById('fileInput').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  statusBar.textContent = 'Loading PDF...';
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const arr = new Uint8Array(ev.target.result);
+    // Chunked base64
+    let binary = '';
+    const chunkSize = 8192;
+    for (let i = 0; i < arr.length; i += chunkSize) {
+      binary += String.fromCharCode(...arr.subarray(i, i + chunkSize));
+    }
+    pdfBase64 = btoa(binary);
+    PDFJS.getDocument({data: arr}).promise.then(doc => {
+      pdfDoc = doc;
+      totalPages = doc.numPages;
+      currentPage = 1;
+      findings = [];
+      document.getElementById('analyzeBtn').disabled = false;
+      document.getElementById('prevPage').disabled = false;
+      document.getElementById('nextPage').disabled = false;
+      renderPage(currentPage);
+      statusBar.textContent = `Loaded: ${file.name} (${totalPages} page${totalPages>1?'s':''})`;
+    });
+  };
+  reader.readAsArrayBuffer(file);
+});
+
+function renderPage(num) {
+  pdfDoc.getPage(num).then(page => {
+    const vp = page.getViewport({scale});
+    canvas.width = vp.width;
+    canvas.height = vp.height;
+    page.render({canvasContext: ctx, viewport: vp}).promise.then(() => {
+      document.getElementById('pageInfo').textContent = `Page ${num} / ${totalPages}`;
+      // Position SVG and bubbles
+      connectorSvg.setAttribute('width', canvas.width);
+      connectorSvg.setAttribute('height', canvas.height);
+      connectorSvg.style.left = canvas.offsetLeft + 'px';
+      renderOverlays();
+    });
+  });
+}
+
+document.getElementById('prevPage').addEventListener('click', () => {
+  if (currentPage > 1) { currentPage--; renderPage(currentPage); }
+});
+document.getElementById('nextPage').addEventListener('click', () => {
+  if (currentPage < totalPages) { currentPage++; renderPage(currentPage); }
+});
+
+// ---- ANALYZE ----
+document.getElementById('analyzeBtn').addEventListener('click', () => {
+  statusBar.textContent = 'Analyzing...';
+  fetch('/analyze', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({pdf: pdfBase64})
+  })
+  .then(r => r.json())
+  .then(data => {
+    findings = (data.findings || []).map((f, i) => ({
+      ...f,
+      id: i,
+      status: 'pending',
+      // Assign a rough position on canvas for the bubble
+      // Use page fraction from server if available, else distribute
+      bx: f.x != null ? f.x * canvas.width : 60 + (i % 3) * 180,
+      by: f.y != null ? f.y * canvas.height : 80 + Math.floor(i / 3) * 130
+    }));
+    renderOverlays();
+    renderSidebar();
+    document.getElementById('exportBtn').disabled = false;
+    statusBar.textContent = `Analysis complete: ${findings.length} finding(s) on ${totalPages} page(s)`;
+  })
+  .catch(err => { statusBar.textContent = 'Analysis error: ' + err; });
+});
+
+// ---- OVERLAYS (bubbles + SVG connectors) ----
+function renderOverlays() {
+  // Remove old bubbles
+  document.querySelectorAll('.finding-bubble').forEach(b => b.remove());
+  connectorSvg.innerHTML = '';
+
+  const pageFindigs = findings.filter(f => (f.page || 1) === currentPage && f.status !== 'rejected');
+
+  pageFindigs.forEach(f => {
+    // Bubble
+    const bubble = document.createElement('div');
+    bubble.className = `finding-bubble severity-${f.severity || 'medium'}`;
+    bubble.dataset.id = f.id;
+
+    // Offset the bubble away from the point
+    const bOffX = f.bx + 30;
+    const bOffY = Math.max(10, f.by - 60);
+    bubble.style.left = (canvas.offsetLeft + bOffX) + 'px';
+    bubble.style.top = bOffY + 'px';
+
+    const sev = (f.severity || 'medium').toLowerCase();
+    const typeLabel = (f.type || 'issue').replace(/_/g,' ');
+    bubble.innerHTML = `
+      <div class="bubble-header">
+        <span class="bubble-tag">${sev}</span>
+        <span class="bubble-type">${typeLabel}</span>
+      </div>
+      <div class="bubble-reason">${f.reason || ''}</div>
+      ${ f.current || f.suggested ? `<div class="bubble-values">Was: <span>${f.current||'?'}</span> &rarr; Use: <span>${f.suggested||'?'}</span></div>` : '' }
+      <div class="bubble-actions">
+        <button class="btn-approve" onclick="setStatus(${f.id},'approved')">&#10003; Approve</button>
+        <button class="btn-reject" onclick="setStatus(${f.id},'rejected')">&#10007; Reject</button>
+        <button class="btn-edit" onclick="openEdit(${f.id})">&#9998; Edit</button>
+      </div>
+    `;
+    viewerWrap.appendChild(bubble);
+
+    // SVG connector line from point on drawing to bubble
+    const line = document.createElementNS('http://www.w3.org/2000/svg','line');
+    line.setAttribute('x1', f.bx);
+    line.setAttribute('y1', f.by);
+    line.setAttribute('x2', bOffX + 0);
+    line.setAttribute('y2', bOffY + 20);
+    const strokeCol = sev === 'high' ? '#e94560' : sev === 'medium' ? '#f0a500' : '#3a86ff';
+    line.setAttribute('stroke', strokeCol);
+    line.setAttribute('stroke-width', '1.5');
+    line.setAttribute('stroke-dasharray', '5,3');
+    connectorSvg.appendChild(line);
+
+    // Dot at target point
+    const circle = document.createElementNS('http://www.w3.org/2000/svg','circle');
+    circle.setAttribute('cx', f.bx);
+    circle.setAttribute('cy', f.by);
+    circle.setAttribute('r', '5');
+    circle.setAttribute('fill', strokeCol);
+    circle.setAttribute('opacity', '0.85');
+    connectorSvg.appendChild(circle);
+  });
+}
+
+function setStatus(id, status) {
+  findings[id].status = status;
+  renderOverlays();
+  renderSidebar();
+}
+
+// ---- EDIT MODAL ----
+function openEdit(id) {
+  editTarget = id;
+  const f = findings[id];
+  document.getElementById('editSuggested').value = f.suggested || '';
+  document.getElementById('editReason').value = f.reason || '';
+  document.getElementById('editModal').classList.add('open');
+}
+document.getElementById('editCancel').onclick = () => {
+  document.getElementById('editModal').classList.remove('open');
+};
+document.getElementById('editSave').onclick = () => {
+  if (editTarget >= 0) {
+    findings[editTarget].suggested = document.getElementById('editSuggested').value;
+    findings[editTarget].reason = document.getElementById('editReason').value;
+    findings[editTarget].status = 'approved';
+  }
+  document.getElementById('editModal').classList.remove('open');
+  renderOverlays();
+  renderSidebar();
+};
+
+// ---- SIDEBAR ----
+function renderSidebar() {
+  const list = document.getElementById('findingsList');
+  list.innerHTML = '';
+  let approved = 0, rejected = 0;
+  findings.forEach(f => {
+    if (f.status === 'approved') approved++;
+    if (f.status === 'rejected') rejected++;
+    const card = document.createElement('div');
+    card.className = `finding-card severity-${f.severity||'medium'} status-${f.status}`;
+    card.innerHTML = `
+      <div class="fc-header">
+        <span class="fc-type">${(f.type||'issue').replace(/_/g,' ')}</span>
+        <span class="fc-sev">${f.severity||'medium'}</span>
+      </div>
+      <div class="fc-reason">${f.reason||''}</div>
+      <div class="fc-status">${f.status.toUpperCase()}</div>
+    `;
+    card.onclick = () => {
+      // Jump to the page of this finding
+      if ((f.page||1) !== currentPage) {
+        currentPage = f.page||1;
+        renderPage(currentPage);
+      }
+    };
+    list.appendChild(card);
+  });
+  document.getElementById('sumTotal').textContent = findings.length;
+  document.getElementById('sumApproved').textContent = approved;
+  document.getElementById('sumRejected').textContent = rejected;
+}
+
+// ---- EXPORT ----
+document.getElementById('exportBtn').addEventListener('click', () => {
+  statusBar.textContent = 'Exporting...';
+  const approved = findings.filter(f => f.status === 'approved');
+  fetch('/export', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({pdf: pdfBase64, findings: approved})
+  })
+  .then(r => r.blob())
+  .then(blob => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'reviewed_drawing.pdf';
+    a.click();
+    URL.revokeObjectURL(url);
+    statusBar.textContent = 'Export complete.';
+  })
+  .catch(err => { statusBar.textContent = 'Export error: ' + err; });
+});
+</script>
+</body>
+</html>
