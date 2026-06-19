@@ -69,7 +69,7 @@ def analyze_pdf(data):
           'x':0.88,'y':0.1})
 
      # --- Rule 7: Projection method indicator
-   if not re.search(r'(FIRST|THIRD)\s+(ANGLE|PROJECTION)|1ST\s+ANGLE|3RD\s+ANGLE',txt,re.I):
+         if not re.search(r'(FIRST|THIRD)\s+(ANGLE|PROJECTION)|1ST\s+ANGLE|3RD\s+ANGLE',txt,re.I):
     findings.append({'page':pn,'type':'missing_projection_method',
      'severity':'medium','current':'(none found)','suggested':'Add projection method symbol (1st/3rd angle)',
      'reason':'No projection method indicator found. ISO standard requires projection symbol.',
