@@ -68,6 +68,84 @@ def analyze_pdf(data):
           'reason':'No revision indicator found on page.',
           'x':0.88,'y':0.1})
 
+     # --- Rule 7: Projection method indicator
+   if not re.search(r'(FIRST|THIRD)\s+(ANGLE|PROJECTION)|1ST\s+ANGLE|3RD\s+ANGLE',txt,re.I):
+    findings.append({'page':pn,'type':'missing_projection_method',
+     'severity':'medium','current':'(none found)','suggested':'Add projection method symbol (1st/3rd angle)',
+     'reason':'No projection method indicator found. ISO standard requires projection symbol.',
+     'x':0.9,'y':0.15})
+
+   # --- Rule 8: Scale verification
+   if not re.search(r'SCALE|1:\d+|\d+:1',txt,re.I):
+    findings.append({'page':pn,'type':'missing_scale',
+     'severity':'high','current':'(none found)','suggested':'Add scale specification (e.g., 1:1, 1:2)',
+     'reason':'No scale specification found. Scale must be clearly indicated.',
+     'x':0.85,'y':0.88})
+
+   # --- Rule 9: Surface finish symbols
+   # Check for modern Ra/Rz notation or legacy triangle symbols
+   if not re.search(r'Ra\s*\d+\.?\d*|Rz\s*\d+\.?\d*|FINISH|SURFACE',txt,re.I):
+    # Only flag if there are dimension values (likely a part drawing)
+    if len(dim_vals)>3:
+     findings.append({'page':pn,'type':'missing_surface_finish',
+      'severity':'low','current':'(none found)','suggested':'Add surface finish specifications if applicable',
+      'reason':'No surface finish notation found. Consider adding Ra/Rz values for critical surfaces.',
+      'x':0.4,'y':0.75})
+
+   # --- Rule 10: Units specification
+   if not re.search(r'\b(MM|MILLIMETERS?|INCHES?|IN)\b|UNLESS\s+OTHERWISE\s+SPECIFIED',txt,re.I):
+    findings.append({'page':pn,'type':'missing_units',
+     'severity':'high','current':'(none found)','suggested':'Add units specification (mm or inches)',
+     'reason':'Drawing units not clearly specified. Add "UNLESS OTHERWISE SPECIFIED, DIMENSIONS ARE IN MM".',
+     'x':0.15,'y':0.9})
+
+   # --- Rule 11: Angular dimensions
+   angular_dims=re.findall(r'\d+°|\d+\s*DEG',txt,re.I)
+   if angular_dims and not re.search(r'ANGULAR\s+TOL|±\s*\d+°|±\s*\d+\s*DEG',txt,re.I):
+    findings.append({'page':pn,'type':'missing_angular_tolerance',
+     'severity':'medium','current':'Angular dimensions found','suggested':'Add angular tolerance specification',
+     'reason':f'Found {len(angular_dims)} angular dimension(s) but no angular tolerance specification.',
+     'x':0.6,'y':0.88})
+
+   # --- Rule 12: Thread callouts
+   thread_patterns=re.findall(r'M\d+\s*x|\d+-\d+\s+(UNC|UNF)|G\d+/\d+',txt,re.I)
+   for tp in thread_patterns[:2]:  # Check first 2 thread callouts
+    if not re.search(rf'{re.escape(tp)}.*?(6g|6H|2B|3B|CLASS|FIT)',txt,re.I):
+     findings.append({'page':pn,'type':'incomplete_thread_spec',
+      'severity':'medium','current':tp.strip(),'suggested':'Add thread class/tolerance (e.g., 6H, 6g, 2B)',
+      'reason':f'Thread callout "{tp.strip()}" found but tolerance class not specified.',
+      'x':0.35,'y':0.4})
+     break  # One finding per page
+
+   # --- Rule 13: GD&T datum references
+   gdt_symbols=re.findall(r'[⌭⏤∥⌓⌒⌯○◎]|GD&T|DATUM',txt,re.I)
+   if gdt_symbols and not re.search(r'DATUM\s+[A-Z]|\-[A-Z]\-',txt):
+    findings.append({'page':pn,'type':'missing_datum_reference',
+     'severity':'medium','current':'GD&T symbols found','suggested':'Add datum references (A, B, C)',
+     'reason':'Geometric tolerancing symbols found but no datum references identified.',
+     'x':0.5,'y':0.35})
+
+   # --- Rule 14: Chamfer and fillet callouts
+   if re.search(r'\bC\s*\d+\.?\d*\b',txt):
+    # Found chamfer notation, verify it's properly specified
+    if not re.search(r'CHAMFER|C\s*\d+\.?\d*\s*X\s*45',txt,re.I):
+     findings.append({'page':pn,'type':'ambiguous_chamfer',
+      'severity':'low','current':'C notation found','suggested':'Use full chamfer specification (e.g., C1.0 X 45° or 1.0 X 1.0)',
+      'reason':'Chamfer notation may be ambiguous. Specify angle or use two-dimension format.',
+      'x':0.45,'y':0.55})
+
+   # --- Rule 15: Section view labeling
+   section_cuts=re.findall(r'SECTION\s+([A-Z])-\1|VIEW\s+([A-Z])-\2',txt,re.I)
+   if section_cuts:
+    for sc in section_cuts:
+     section_label=sc[0] or sc[1]
+     if not re.search(rf'SCALE.*{section_label}',txt,re.I):
+      findings.append({'page':pn,'type':'section_without_scale',
+       'severity':'low','current':f'Section {section_label}','suggested':'Add scale for section view',
+       'reason':f'Section {section_label}-{section_label} found but scale not specified for this view.',
+       'x':0.25,'y':0.3})
+      break
+
   except Exception as e:
     traceback.print_exc()
     findings.append({'page':1,'type':'parse_error','severity':'high',
